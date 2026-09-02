@@ -100,9 +100,12 @@ jobs:
       - name: Publish to GitHub Packages
         # Only from the branch itself; pull requests build and test but must not publish.
         if: github.event_name != 'pull_request'
+        # The id::layout::url form is required, not the shorter id::url: the Confluent parent
+        # pins maven-deploy-plugin 2.8.2, which predates the two-part syntax and rejects it
+        # with "Invalid syntax for alternative repository".
         run: |
           mvn $MAVEN_ARGS -pl "$MODULE" -DskipTests deploy \
-            -DaltDeploymentRepository="github::https://maven.pkg.github.com/${{ github.repository }}"
+            -DaltDeploymentRepository="github::default::https://maven.pkg.github.com/${{ github.repository }}"
         env:
           MAVEN_USERNAME: ${{ github.actor }}
           MAVEN_TOKEN: ${{ secrets.GITHUB_TOKEN }}
