@@ -35,6 +35,14 @@ public class KafkaProtobufDeserializerConfig extends AbstractKafkaSchemaSerDeCon
   public static final String DERIVE_TYPE_DOC =
       "Whether to derive the class based on `java_outer_classname` and `java_multiple_files`.";
 
+  public static final String HARDCODED_RULE_SET_ENABLE = "hardcoded.rule.set.enable";
+  public static final String HARDCODED_RULE_SET_ENABLE_DOC =
+      "Whether to apply the domain read rules compiled into this jar "
+          + "(io.confluent.kafka.serializers.protobuf.HardcodedRuleSets) to schemas that carry "
+          + "no domain read rules of their own. For deployments that cannot register a ruleset "
+          + "on their subjects; a schema whose own ruleset has domain read rules is left alone. "
+          + "Defaults to false.";
+
   private static final ConfigDef config;
 
   static {
@@ -56,6 +64,12 @@ public class KafkaProtobufDeserializerConfig extends AbstractKafkaSchemaSerDeCon
         false,
         ConfigDef.Importance.MEDIUM,
         DERIVE_TYPE_DOC
+    ).define(
+        HARDCODED_RULE_SET_ENABLE,
+        ConfigDef.Type.BOOLEAN,
+        false,
+        ConfigDef.Importance.LOW,
+        HARDCODED_RULE_SET_ENABLE_DOC
     );
   }
 

@@ -23,6 +23,20 @@
     </licenses>
 
     <artifactId>kafka-protobuf-serializer</artifactId>
+    <!--
+      Alpian: this module is republished with the hardcoded PII redaction rule set (see
+      HardcodedRuleSets). The groupId and artifactId stay Confluent's on purpose. A consumer
+      pulls this artifact in alongside io.confluent:* siblings, and only matching
+      groupId:artifactId coordinates let Maven and Gradle treat the two as one dependency and
+      pick a version. Renaming the group would put both jars on the classpath with the same
+      class names, and which one wins would come down to classpath order.
+
+      Bump the qualifier on every release; rebasing onto a newer upstream tag also means
+      changing the 8.3.1 prefix to match. The parent's io.confluent.schema-registry.version
+      property is a literal, not ${project.version}, so overriding the version here does not
+      change how the sibling artifacts resolve.
+    -->
+    <version>8.3.1-alpian-1</version>
     <packaging>jar</packaging>
     <name>kafka-protobuf-serializer</name>
 

@@ -28,7 +28,9 @@ import io.confluent.kafka.schemaregistry.ParsedSchema;
 import io.confluent.kafka.schemaregistry.ParsedSchemaAndValue;
 import io.confluent.kafka.schemaregistry.rules.RuleResult;
 import io.confluent.kafka.schemaregistry.client.rest.entities.Metadata;
+import io.confluent.kafka.schemaregistry.client.rest.entities.Rule;
 import io.confluent.kafka.schemaregistry.client.rest.entities.RuleMode;
+import io.confluent.kafka.schemaregistry.client.rest.entities.RuleSet;
 import io.confluent.kafka.schemaregistry.rules.RulePhase;
 import io.confluent.kafka.serializers.schema.id.SchemaIdDeserializer;
 import io.confluent.kafka.serializers.schema.id.SchemaId;
@@ -66,10 +68,15 @@ public abstract class AbstractKafkaProtobufDeserializer<T extends Message>
   protected Class<T> specificProtobufClass;
   protected Method parseMethod;
   protected boolean deriveType;
+  protected boolean hardcodedRuleSetEnabled;
   private final Cache<Pair<String, ProtobufSchema>, ProtobufSchema> schemaCache;
+  private final Cache<ProtobufSchema, ProtobufSchema> ruleSetSchemaCache;
 
   public AbstractKafkaProtobufDeserializer() {
     schemaCache = CacheBuilder.newBuilder()
+        .maximumSize(DEFAULT_CACHE_CAPACITY)
+        .build();
+    ruleSetSchemaCache = CacheBuilder.newBuilder()
         .maximumSize(DEFAULT_CACHE_CAPACITY)
         .build();
   }
@@ -87,6 +94,8 @@ public abstract class AbstractKafkaProtobufDeserializer<T extends Message>
             "parseFrom", ByteBuffer.class, ExtensionRegistryLite.class);
       }
       this.deriveType = config.getBoolean(KafkaProtobufDeserializerConfig.DERIVE_TYPE_CONFIG);
+      this.hardcodedRuleSetEnabled = config.getBoolean(
+          KafkaProtobufDeserializerConfig.HARDCODED_RULE_SET_ENABLE);
     } catch (Exception e) {
       throw new ConfigException("Class " + specificProtobufClass.getCanonicalName()
           + " is not a valid protobuf message class", e);
@@ -220,7 +229,14 @@ public abstract class AbstractKafkaProtobufDeserializer<T extends Message>
       if (readerSchema != null) {
         schema = readerSchema;
       }
-      if (schema.ruleSet() != null && schema.ruleSet().hasRules(RulePhase.DOMAIN, RuleMode.READ)) {
+      // executeRules reads the rules off the schema it is handed, so a hardcoded rule set has to
+      // ride on a schema object. It rides on a local one: `schema` is what the descriptor below
+      // is taken from and what a Connect converter gets back inside ProtobufSchemaAndValue, and
+      // the note above about returning only equivalent schemas applies to a ruleset-bearing copy
+      // as much as to a version-bearing one.
+      ProtobufSchema rulesSchema = schemaWithRuleSet(schema);
+      if (rulesSchema.ruleSet() != null
+          && rulesSchema.ruleSet().hasRules(RulePhase.DOMAIN, RuleMode.READ)) {
         if (message == null) {
           message = DynamicMessage.parseFrom(schema.toDescriptor(),
               CodedInputStream.newInstance(buffer.array(), start, length),
@@ -228,7 +244,7 @@ public abstract class AbstractKafkaProtobufDeserializer<T extends Message>
         }
         message = executeRules(
             subject, topic, headers, payload, RulePhase.DOMAIN, RuleMode.READ, null,
-            schema, message, ruleResults
+            rulesSchema, message, ruleResults
         );
       }
 
@@ -293,6 +309,46 @@ public abstract class AbstractKafkaProtobufDeserializer<T extends Message>
     } finally {
       postOp(payload);
     }
+  }
+
+  /**
+   * Returns the schema whose domain read rules should run, which is {@code schema} itself unless
+   * the hardcoded rule set is enabled and the schema has no domain read rules of its own.
+   *
+   * <p>Fill-when-absent rather than override: a schema that does carry domain read rules got them
+   * from its registration, and those may be the only thing that can read its payload at all — a
+   * field-level decryption rule, say — so they are never replaced by the compiled-in ones. What
+   * the schema does carry is kept for the same reason, including {@code enableAt}: a registration
+   * that switched its rules off has said something about this consumer, not just about its own
+   * rules.
+   */
+  private ProtobufSchema schemaWithRuleSet(ProtobufSchema schema) {
+    RuleSet ruleSet = schema.ruleSet();
+    if (!hardcodedRuleSetEnabled
+        || (ruleSet != null && ruleSet.hasRules(RulePhase.DOMAIN, RuleMode.READ))) {
+      return schema;
+    }
+    // Cached for the same reason schemaWithName is: this runs per record, and copy() rebuilds
+    // the schema object rather than sharing it.
+    try {
+      return ruleSetSchemaCache.get(schema, () -> copyWithHardcodedRuleSet(schema));
+    } catch (ExecutionException e) {
+      return copyWithHardcodedRuleSet(schema);
+    }
+  }
+
+  private ProtobufSchema copyWithHardcodedRuleSet(ProtobufSchema schema) {
+    RuleSet ruleSet = schema.ruleSet();
+    RuleSet merged;
+    if (ruleSet == null) {
+      merged = HardcodedRuleSets.READ_RULE_SET;
+    } else {
+      List<Rule> domainRules = new ArrayList<>(ruleSet.getDomainRules());
+      domainRules.addAll(HardcodedRuleSets.READ_RULE_SET.getDomainRules());
+      merged = new RuleSet(ruleSet.getMigrationRules(), domainRules,
+          ruleSet.getEncodingRules(), ruleSet.getEnableAt());
+    }
+    return schema.copy(schema.metadata(), merged);
   }
 
   private ProtobufSchema schemaWithName(ProtobufSchema schema, String name) {
