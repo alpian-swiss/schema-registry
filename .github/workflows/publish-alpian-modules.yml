@@ -1,0 +1,220 @@
+name: Publish Alpian modules
+
+# Builds the patched modules and publishes them to this repository's GitHub Packages Maven
+# registry. Nothing else in the reactor is built: the 8.3.1 siblings (kafka-protobuf-provider,
+# kafka-schema-serializer, kafka-schema-registry-client, ...) resolve as published artifacts
+# from packages.confluent.io, which is why there is no -am here and no need to build `common`
+# or `rest-utils` from source.
+#
+# The two modules are versioned independently, so a run publishes only the ones the push
+# actually touched. That is not just tidiness: GitHub Packages refuses to overwrite an existing
+# release version, so rebuilding an unchanged module would fail the job on a 409.
+#
+# See ALPIAN.md for the branch model and how to rebase onto a newer upstream tag.
+
+on:
+  push:
+    branches: [ 'alpian/main' ]
+    paths:
+      - 'protobuf-serializer/**'
+      - 'protobuf-converter/**'
+      - '.alpian-base'
+      - '.github/workflows/publish-alpian-modules.yml'
+  pull_request:
+    paths:
+      - 'protobuf-serializer/**'
+      - 'protobuf-converter/**'
+      - '.alpian-base'
+      - '.github/workflows/publish-alpian-modules.yml'
+  workflow_dispatch:
+    inputs:
+      module:
+        description: 'Module to publish'
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - protobuf-serializer
+          - protobuf-converter
+      version:
+        description: 'Override the version to publish (requires a single module)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # One publish at a time per branch; a queued run would race for the same coordinates.
+  group: publish-alpian-modules-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MAVEN_ARGS: >-
+    -B -ntp
+    -Dspotless.check.skip=true
+    -Dcheckstyle.skip=true
+
+jobs:
+  select:
+    name: Select modules
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.pick.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The push range below needs both endpoints, and `before` can be many commits back.
+          fetch-depth: 0
+
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_MODULE: ${{ inputs.module }}
+          INPUT_VERSION: ${{ inputs.version }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          all='["protobuf-serializer","protobuf-converter"]'
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_VERSION" ] && [ "$INPUT_MODULE" = "both" ]; then
+              echo "::error::A version override applies to one module. The two are versioned" \
+                   "independently, so 'both' plus an override would stamp the same number on" \
+                   "two unrelated jars. Pick a single module, or clear the override."
+              exit 1
+            fi
+            if [ "$INPUT_MODULE" = "both" ]; then
+              picked="$all"
+            else
+              picked="[\"$INPUT_MODULE\"]"
+            fi
+          elif [ "$EVENT" = "pull_request" ]; then
+            # A PR builds and tests but never publishes, so there is nothing to collide with.
+            # Build both: a change to one module can still break the other's tests.
+            picked="$all"
+          else
+            # Push. A change to the shared base or to this workflow affects both modules;
+            # otherwise publish only what was touched. An all-zero `before` means the branch
+            # is new to this remote and there is no range to diff -- fall back to both.
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              picked="$all"
+            else
+              changed="$(git diff --name-only "$BEFORE" "$AFTER")"
+              if grep -qE '^(\.alpian-base|\.github/workflows/)' <<<"$changed"; then
+                picked="$all"
+              else
+                picked='[]'
+                for m in protobuf-serializer protobuf-converter; do
+                  if grep -q "^$m/" <<<"$changed"; then
+                    picked="$(jq -cn --argjson p "$picked" --arg m "$m" '$p + [$m]')"
+                  fi
+                done
+              fi
+            fi
+          fi
+
+          echo "modules=$picked" >> "$GITHUB_OUTPUT"
+          echo "Will build: $picked"
+
+  build:
+    needs: select
+    if: needs.select.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      # One module's failure should not hide the other's result. They publish to distinct
+      # coordinates, so a half-published pair is recoverable by rerunning the failed job --
+      # and is easier to diagnose than a cancelled sibling.
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.select.outputs.modules) }}
+    name: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          # Matches the JDK this was verified on. The modules target Java 11 bytecode, so 17
+          # or 21 should work too -- this is the version that is actually known to build green.
+          java-version: '25'
+          distribution: temurin
+          cache: maven
+          # Writes ~/.m2/settings.xml with a <server> whose id matches the repository the
+          # deploy step targets, reading the two env vars set on that step.
+          server-id: github
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_TOKEN
+
+      - name: Confirm the branch is based on the tag it claims
+        # Three things must agree, or the published artifact's name misstates what it was built
+        # from. The reactor version is the ground truth: it comes from the upstream tag the
+        # branch was rebased onto, and cannot be forgotten the way the other two can.
+        run: |
+          base="$(cat .alpian-base)"
+          upstream="$(mvn $MAVEN_ARGS -q -DforceStdout \
+            -Dexpression=project.version --non-recursive help:evaluate)"
+          module="$(mvn $MAVEN_ARGS -pl "${{ matrix.module }}" -q -DforceStdout \
+            -Dexpression=project.version help:evaluate)"
+          echo ".alpian-base:     $base"
+          echo "upstream reactor: $upstream"
+          echo "module version:   $module"
+          if [ "${base#v}" != "$upstream" ]; then
+            echo "::error::.alpian-base says ${base#v} but the tree is upstream $upstream." \
+                 "Rebased onto a new tag without updating .alpian-base?"
+            exit 1
+          fi
+          case "$module" in
+            "$upstream"-*) echo "OK: all three agree on $upstream" ;;
+            *) echo "::error::Module version '$module' is not derived from $upstream." \
+                    "Restamp <version> in ${{ matrix.module }}/pom.xml to ${upstream}-alpian.N."
+               exit 1 ;;
+          esac
+
+      - name: Override version
+        if: inputs.version != ''
+        run: |
+          mvn $MAVEN_ARGS -pl "${{ matrix.module }}" versions:set \
+            -DnewVersion='${{ inputs.version }}' -DgenerateBackupPoms=false
+
+      - name: Build and test
+        run: mvn $MAVEN_ARGS -pl "${{ matrix.module }}" verify
+
+      - name: Publish to GitHub Packages
+        # Only from the branch itself; pull requests build and test but must not publish.
+        if: github.event_name != 'pull_request'
+        # The id::layout::url form is required, not the shorter id::url: the Confluent parent
+        # pins maven-deploy-plugin 2.8.2, which predates the two-part syntax and rejects it
+        # with "Invalid syntax for alternative repository".
+        #
+        # If this fails with a 409, the version already exists: GitHub Packages will not
+        # overwrite a release. Bump the qualifier in the module's pom rather than retrying.
+        run: |
+          mvn $MAVEN_ARGS -pl "${{ matrix.module }}" -DskipTests deploy \
+            -DaltDeploymentRepository="github::default::https://maven.pkg.github.com/${{ github.repository }}"
+        env:
+          MAVEN_USERNAME: ${{ github.actor }}
+          MAVEN_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.module }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| upstream base | \`$(cat .alpian-base)\` |"
+            echo "| artifact | \`$(ls ${{ matrix.module }}/target/*.jar 2>/dev/null | grep -v -e sources -e javadoc -e tests | head -1 | xargs -r basename)\` |"
+            echo "| published to | \`https://maven.pkg.github.com/${{ github.repository }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ${{ matrix.module }}-jars
+          path: ${{ matrix.module }}/target/*.jar
+          if-no-files-found: warn
