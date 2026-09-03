@@ -104,6 +104,13 @@ public class ProtobufData {
   public static final String PROTOBUF_TYPE_TAG = NAMESPACE + ".Tag";
   public static final String PROTOBUF_TYPE_PROP = NAMESPACE + ".Type";
 
+  /**
+   * Alpian: a field carrying this Confluent meta tag gets a Connect schema parameter of the
+   * same name, so a connector downstream can see the classification without re-reading the
+   * Protobuf descriptor. Unlike the parameters above this is not an upstream convention.
+   */
+  public static final String PII_TAG = "PII";
+
   public static final String PROTOBUF_PRECISION_PROP = "precision";
   public static final String PROTOBUF_SCALE_PROP = "scale";
   public static final String PROTOBUF_DECIMAL_LOCATION = "confluent/type/decimal.proto";
@@ -1575,6 +1582,14 @@ public class ProtobufData {
       }
     } else if (!useWrapperForNullables) {
       builder.optional();
+    }
+    // Alpian: lands on whatever builder the field ended up with -- for a repeated field that
+    // is the array schema, the same place the tag number below goes.
+    if (descriptor.getOptions().hasExtension(MetaProto.fieldMeta)) {
+      Meta fieldMeta = descriptor.getOptions().getExtension(MetaProto.fieldMeta);
+      if (fieldMeta.getTagsList().contains(PII_TAG)) {
+        builder.parameter(PII_TAG, "true");
+      }
     }
     builder.parameter(PROTOBUF_TYPE_TAG, String.valueOf(descriptor.getNumber()));
     return builder.build();

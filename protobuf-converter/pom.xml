@@ -23,6 +23,21 @@
     </licenses>
 
     <artifactId>kafka-connect-protobuf-converter</artifactId>
+    <!--
+      Alpian: republished so that ProtobufData carries a field's PII meta tag through to the
+      Connect schema. Same reasoning as protobuf-serializer/pom.xml for keeping Confluent's
+      groupId and artifactId: two jars with identical class names on one classpath is worse
+      than a surprising version string.
+
+      Versioned independently of protobuf-serializer: the two are unrelated jars, and the
+      qualifiers only happen to line up today. Bump this one when this module changes, and
+      leave the other alone: republishing a byte-identical jar under a new number would make
+      a consumer edit a pin for nothing.
+
+      Bump the qualifier on every release; a rebase onto a newer upstream tag also means
+      changing the 8.3.1 prefix to match.
+    -->
+    <version>8.3.1-alpian-1</version>
     <packaging>jar</packaging>
     <name>kafka-connect-protobuf-converter</name>
 

@@ -35,6 +35,10 @@
       changing the 8.3.1 prefix to match. The parent's io.confluent.schema-registry.version
       property is a literal, not ${project.version}, so overriding the version here does not
       change how the sibling artifacts resolve.
+
+      Versioned independently of protobuf-converter/pom.xml, the fork's other patched module.
+      The two are unrelated jars with unrelated contents, and CI publishes only the ones a push
+      actually touched, so a consumer never has to move a pin for a rebuild it did not need.
     -->
     <version>8.3.1-alpian-1</version>
     <packaging>jar</packaging>
