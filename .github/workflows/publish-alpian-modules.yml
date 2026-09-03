@@ -170,7 +170,7 @@ jobs:
           case "$module" in
             "$upstream"-*) echo "OK: all three agree on $upstream" ;;
             *) echo "::error::Module version '$module' is not derived from $upstream." \
-                    "Restamp <version> in ${{ matrix.module }}/pom.xml to ${upstream}-alpian-N."
+                    "Restamp <version> in ${{ matrix.module }}/pom.xml to ${upstream}-alpian.N."
                exit 1 ;;
           esac
 

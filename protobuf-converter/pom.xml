@@ -29,15 +29,16 @@
       groupId and artifactId: two jars with identical class names on one classpath is worse
       than a surprising version string.
 
-      Versioned independently of protobuf-serializer: the two are unrelated jars, and the
-      qualifiers only happen to line up today. Bump this one when this module changes, and
-      leave the other alone: republishing a byte-identical jar under a new number would make
-      a consumer edit a pin for nothing.
+      The version is <upstream base>-alpian.<n>, same scheme as protobuf-serializer/pom.xml, but
+      the counter runs independently. The two are unrelated jars deployed to different services
+      — this one to a Connect worker, that one to the service doing its own deserialization —
+      so they are never on one classpath. Bump this one when this module changes and leave the
+      other alone: republishing a byte-identical jar under a new number would make a consumer
+      edit a pin for nothing. Expect the two numbers to drift apart.
 
-      Bump the qualifier on every release; a rebase onto a newer upstream tag also means
-      changing the 8.3.1 prefix to match.
+      A rebase onto a newer upstream tag means changing the 8.3.1 prefix to match, on both.
     -->
-    <version>8.3.1-alpian-1</version>
+    <version>8.3.1-alpian.1</version>
     <packaging>jar</packaging>
     <name>kafka-connect-protobuf-converter</name>
 

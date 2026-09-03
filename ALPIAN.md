@@ -77,7 +77,7 @@ git rebase --onto v8.4.0 "$(cat .alpian-base)"
 # 3. Restamp the three places that name the base.
 echo v8.4.0 > .alpian-base
 #    ...and the <version> in BOTH protobuf-serializer/pom.xml and protobuf-converter/pom.xml
-#    -> 8.4.0-alpian-1. The prefix has to track the base even though the two qualifiers are
+#    -> 8.4.0-alpian.1. The prefix has to track the base even though the two qualifiers are
 #    otherwise independent, so this is the one time both poms move together.
 
 # 4. Verify locally, exactly as CI does.
@@ -174,8 +174,8 @@ mvn -pl protobuf-serializer,protobuf-converter -DskipTests install   # into ~/.m
 Published as:
 
 ```
-io.confluent:kafka-protobuf-serializer:8.3.1-alpian-1
-io.confluent:kafka-connect-protobuf-converter:8.3.1-alpian-1
+io.confluent:kafka-protobuf-serializer:8.3.1-alpian.1
+io.confluent:kafka-connect-protobuf-converter:8.3.1-alpian.1
 ```
 
 **Confluent's groupId and artifactId, deliberately.** A consumer pulls these in alongside
@@ -184,13 +184,36 @@ ours and upstream's as one dependency and resolve a single version. Republishing
 `com.alpian` would put both jars on the classpath carrying the same class names, and which one
 won would come down to classpath order.
 
-**The two qualifiers are independent.** They both read `-alpian-1` today only because both
-patches happen to be at their first release. Bump the one whose module changed and leave the
-other alone: republishing a byte-identical jar under a new number would make every consumer edit
-a pin for a rebuild they did not need. Expect them to drift apart, and do not read a matching
-qualifier as meaning the two were released together.
+### Version scheme
 
-The prefix is the exception. It names the upstream base, so a rebase moves it on both at once.
+```
+8.3.1        -alpian.       1
+^^^^^                       ^
+upstream base               our release count off that base
+```
+
+The prefix is whichever Confluent release the branch is based on, and it moves on both modules
+at once when the base does — that is what `.alpian-base` and the CI check exist to keep honest.
+The qualifier counts our own releases and **is independent per module**: bump the one whose
+module changed and leave the other alone. Republishing a byte-identical jar under a new number
+would make every consumer edit a pin for a rebuild they did not need.
+
+They both read `.1` today only because both patches are at their first release. Expect them to
+drift apart, and do not read a matching qualifier as meaning the two were released together.
+
+Two things about how Maven orders this, both checked against `ComparableVersion` rather than
+assumed:
+
+- `8.3.1-alpian.1` sorts **above** plain `8.3.1`, and `.9` below `.10` — the counter is compared
+  numerically, not as text, so it keeps working past nine releases.
+- It sorts **below** `8.3.2`. If Confluent ships a patch release, anything resolving a range
+  rather than a pin drifts back to upstream and silently loses the patch. Pin it — see below.
+
+> **The scheme changed on 2026-09-04**, from `-alpian-1` to `-alpian.1`. The one artifact
+> published under the old spelling, `kafka-protobuf-serializer:8.3.1-alpian-1` (hyphen), is
+> still in the registry and still resolvable. The hyphen form sorts *below* the dot form, so
+> moving a pin forward is an upgrade rather than a downgrade — but it is a manual edit, not
+> something a range picks up. Nothing needs the old version deleted.
 
 The cost is that a consumer must point at GitHub Packages for an `io.confluent` artifact, so a
 repository content filter has to allow it. In Gradle:
@@ -204,8 +227,9 @@ repositories {
             password = System.getenv('GITHUB_TOKEN')
         }
         content {
-            // Narrower than includeGroupByRegex "com\\.alpian.*" -- these two artifacts only,
-            // so every other io.confluent dependency still comes from Confluent's repo.
+            // Narrower than includeGroupByRegex "com\\.alpian.*" -- these artifacts only, so
+            // every other io.confluent dependency still comes from Confluent's repo. Keep just
+            // the line for the artifact this service uses; no deployment needs both.
             includeModule('io.confluent', 'kafka-protobuf-serializer')
             includeModule('io.confluent', 'kafka-connect-protobuf-converter')
         }
@@ -225,33 +249,45 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
   https://packages.confluent.io/maven/io/confluent/kafka-schema-registry-parent/8.3.1/kafka-schema-registry-parent-8.3.1.pom
 ```
 
-`kafka-connect-protobuf-converter` resolves the same way, with one extra note: its POM depends on
-the **upstream** `io.confluent:kafka-protobuf-serializer:8.3.1`, not on our patched build. That
-is on purpose — pointing it at `8.3.1-alpian-1` would make CI's two jobs depend on each other's
-publish order, and would have to be restamped every time the serializer's qualifier moved. If a Connect worker needs both the schema parameter and the redaction, pin both
-artifacts explicitly as below; the version constraint is what makes the patched serializer win
-over the one the converter's POM asks for.
+`kafka-connect-protobuf-converter` resolves the same way, with one note: its POM depends on the
+**upstream** `io.confluent:kafka-protobuf-serializer:8.3.1`, not on our patched build. That is on
+purpose and it is correct — the two are deployed to different services and are not meant to run
+together. A Connect worker gets the converter and, transitively, Confluent's own serializer;
+redaction is not part of that deployment, and the `PII=true` schema parameter is what the worker
+acts on instead. Pointing the dependency at our serializer would also make CI's two jobs depend
+on each other's publish order and need restamping every time either qualifier moved.
 
 If the service resolves through an internal mirror rather than packages.confluent.io directly,
 check that the mirror actually carries the 8.3.1 line — one pinned to a different release will
 fail to resolve the parent, not the jar, which makes for a confusing error.
 
-Then pin the version so nothing drags the upstream one back in:
+Then pin the version so nothing drags the upstream one back in. Take the line for the artifact
+that service actually uses — a service deserializing Protobuf itself wants the first, a Connect
+worker wants the second, and no deployment needs both:
 
 ```groovy
 dependencies {
-    implementation('io.confluent:kafka-protobuf-serializer:8.3.1-alpian-1')
-    implementation('io.confluent:kafka-connect-protobuf-converter:8.3.1-alpian-1')
+    // A service that deserializes Protobuf itself and needs the compiled-in redaction:
+    implementation('io.confluent:kafka-protobuf-serializer:8.3.1-alpian.1')
     constraints {
-        implementation('io.confluent:kafka-protobuf-serializer:8.3.1-alpian-1') {
+        implementation('io.confluent:kafka-protobuf-serializer:8.3.1-alpian.1') {
             because 'carries the hardcoded PII redaction rule set'
         }
-        implementation('io.confluent:kafka-connect-protobuf-converter:8.3.1-alpian-1') {
+    }
+
+    // ...or a Connect worker that needs the PII tag on the Connect schema:
+    implementation('io.confluent:kafka-connect-protobuf-converter:8.3.1-alpian.1')
+    constraints {
+        implementation('io.confluent:kafka-connect-protobuf-converter:8.3.1-alpian.1') {
             because 'carries the PII meta tag into the Connect schema'
         }
     }
 }
 ```
+
+The `constraints` block is what keeps the pin from being outvoted: without it, anything else in
+the graph asking for a newer upstream `8.3.x` wins on version order and the patch disappears
+without an error.
 
 Keep the other `io.confluent:*` dependencies in that service on the same base version (8.3.1)
 rather than mixing with 8.5.x.
